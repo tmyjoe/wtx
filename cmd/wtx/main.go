@@ -11,8 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 )
+
+var version = "dev"
 
 type config struct {
 	MainBranch        string   `json:"mainBranch"`
@@ -60,7 +63,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: wtx <start|new|nw|new-worktree|clean> [args...]"))
+		fatal(errors.New("usage: wtx <start|new|nw|new-worktree|clean|version> [args...]"))
 	}
 
 	sub := os.Args[1]
@@ -75,6 +78,9 @@ func main() {
 		err = runNewWorktree(cfg, args, true)
 	case "clean":
 		err = runClean(cfg)
+	case "version":
+		fmt.Println(resolveVersion())
+		return
 	default:
 		err = fmt.Errorf("unknown command: %s", sub)
 	}
@@ -622,4 +628,35 @@ func regexpMustCompile(pattern string) *regexp.Regexp {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "ERROR:", err)
 	os.Exit(1)
+}
+
+func resolveVersion() string {
+	v := strings.TrimSpace(version)
+	if v != "" && v != "dev" {
+		return v
+	}
+
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		var rev string
+		var dirty string
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.revision" {
+				rev = s.Value
+			}
+			if s.Key == "vcs.modified" {
+				dirty = s.Value
+			}
+		}
+		if rev != "" {
+			short := rev
+			if len(short) > 12 {
+				short = short[:12]
+			}
+			if dirty == "true" {
+				return short + "-dirty"
+			}
+			return short
+		}
+	}
+	return "dev"
 }
