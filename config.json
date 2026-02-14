@@ -1,0 +1,48 @@
+{
+  "mainBranch": "develop",
+  "defaultBaseBranch": "develop",
+  "worktreesDir": ".wt",
+  "envFiles": [
+    "apps/web/.env.local",
+    "apps/web/.env",
+    "apps/python/.env"
+  ],
+  "frontendDir": "apps/web",
+  "backendDir": "apps/python",
+  "frontendInstallCmd": [
+    "pnpm",
+    "install"
+  ],
+  "backendInstallCmd": [
+    "make",
+    "install"
+  ],
+  "llm": {
+    "default": "codex",
+    "allowed": [
+      "codex",
+      "claude"
+    ],
+    "branchNamePromptTemplate": "次の作業内容から適切なgitブランチ名を1つだけ出して。英語・kebab-caseで。説明不要。: {task}",
+    "commands": {
+      "codex": {
+        "branchNameArgsTemplate": [
+          "e",
+          "{prompt}"
+        ],
+        "taskRunArgsTemplate": [
+          "{task}"
+        ]
+      },
+      "claude": {
+        "branchNameArgsTemplate": [
+          "{prompt}"
+        ],
+        "taskRunArgsTemplate": [
+          "{task}"
+        ]
+      }
+    }
+  }
+}
+
