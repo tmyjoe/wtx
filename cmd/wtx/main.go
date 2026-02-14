@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 )
 
@@ -63,7 +64,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: wtx <start|new|nw|new-worktree|clean|version> [args...]"))
+		fatal(errors.New("usage: wtx <start|new|nw|new-worktree|clean|switch|version> [args...]"))
 	}
 
 	sub := os.Args[1]
@@ -78,6 +79,8 @@ func main() {
 		err = runNewWorktree(cfg, args, true)
 	case "clean":
 		err = runClean(cfg)
+	case "switch":
+		err = runSwitch(args)
 	case "version":
 		fmt.Println(resolveVersion())
 		return
@@ -97,14 +100,14 @@ func runStart(cfg config, args []string) error {
 	switch len(args) {
 	case 0:
 		task = promptRequired("作業内容: ")
-		base = promptDefault("ベースブランチ ["+cfg.DefaultBaseBranch+"]: ", cfg.DefaultBaseBranch)
+		base = promptBaseBranch(cfg.DefaultBaseBranch)
 		llm = promptOptional("AIを選択してください (codex/claude): ")
 	case 1:
 		v := strings.ToLower(strings.TrimSpace(args[0]))
 		if isAllowedLLM(cfg, v) {
 			llm = v
 			task = promptRequired("作業内容: ")
-			base = promptDefault("ベースブランチ ["+cfg.DefaultBaseBranch+"]: ", cfg.DefaultBaseBranch)
+			base = promptBaseBranch(cfg.DefaultBaseBranch)
 		} else {
 			task = args[0]
 		}
@@ -152,7 +155,7 @@ func runNewWorktree(cfg config, args []string, runTask bool) error {
 
 	if strings.TrimSpace(task) == "" {
 		task = promptRequired("作業内容: ")
-		base = promptDefault("ベースブランチ ["+cfg.DefaultBaseBranch+"]: ", cfg.DefaultBaseBranch)
+		base = promptBaseBranch(cfg.DefaultBaseBranch)
 		llm = promptDefault("AIを選択してください (codex/claude) ["+cfg.LLM.Default+"]: ", cfg.LLM.Default)
 	}
 
@@ -325,6 +328,79 @@ func runClean(cfg config) error {
 	}
 	fmt.Println("Done cleaning merged worktrees.")
 	return nil
+}
+
+func runSwitch(args []string) error {
+	if err := requireCmd("git"); err != nil {
+		return err
+	}
+	if _, err := runCmdCapture("", "git", "rev-parse", "--is-inside-work-tree"); err != nil {
+		return errors.New("not inside a git repository")
+	}
+
+	listRaw, err := runCmdCapture("", "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	entries := parseWorktreeList(listRaw)
+	if len(entries) == 0 {
+		return errors.New("no worktrees found")
+	}
+
+	selected, err := selectWorktree(entries, args)
+	if err != nil {
+		return err
+	}
+
+	shell := strings.TrimSpace(os.Getenv("SHELL"))
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	fmt.Printf("Launching shell in: %s\n", selected.path)
+
+	cmd := exec.Command(shell)
+	cmd.Dir = selected.path
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func selectWorktree(entries []worktreeEntry, args []string) (worktreeEntry, error) {
+	if len(args) > 0 {
+		// index selection
+		if idx, err := strconv.Atoi(strings.TrimSpace(args[0])); err == nil {
+			if idx >= 1 && idx <= len(entries) {
+				return entries[idx-1], nil
+			}
+			return worktreeEntry{}, fmt.Errorf("invalid index: %d", idx)
+		}
+		// branch or path selection
+		target := strings.TrimSpace(args[0])
+		for _, e := range entries {
+			branch := strings.TrimPrefix(e.branch, "refs/heads/")
+			if target == e.path || target == branch {
+				return e, nil
+			}
+		}
+		return worktreeEntry{}, fmt.Errorf("worktree not found: %s", target)
+	}
+
+	fmt.Println("Select worktree:")
+	for i, e := range entries {
+		branch := strings.TrimPrefix(e.branch, "refs/heads/")
+		if branch == "" {
+			branch = "(detached)"
+		}
+		fmt.Printf("  %d) %s\n", i+1, branch)
+	}
+	fmt.Print("番号またはブランチ名を入力: ")
+	in, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	in = strings.TrimSpace(in)
+	if in == "" {
+		return worktreeEntry{}, errors.New("no selection provided")
+	}
+	return selectWorktree(entries, []string{in})
 }
 
 func generateBranchName(cfg config, task, llm string) string {
@@ -566,6 +642,73 @@ func promptRequired(label string) string {
 		fatal(errors.New("no description provided"))
 	}
 	return v
+}
+
+func promptBaseBranch(defaultBranch string) string {
+	_ = runCmd("git", "fetch", "origin", "--prune")
+	branches, err := recentRemoteBranches("origin", 10)
+	if err != nil || len(branches) == 0 {
+		return promptDefault("ベースブランチ ["+defaultBranch+"]: ", defaultBranch)
+	}
+
+	fmt.Println("ベースブランチ候補（remote更新順）:")
+	for i, b := range branches {
+		fmt.Printf("  %d) %s\n", i+1, b)
+	}
+	fmt.Printf("番号またはブランチ名を入力 [%s]: ", defaultBranch)
+	in, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	in = strings.TrimSpace(in)
+	if in == "" {
+		return defaultBranch
+	}
+	if idx, err := strconv.Atoi(in); err == nil {
+		if idx >= 1 && idx <= len(branches) {
+			return branches[idx-1]
+		}
+		return defaultBranch
+	}
+	return in
+}
+
+func recentRemoteBranches(remote string, limit int) ([]string, error) {
+	out, err := runCmdCapture(
+		"",
+		"git",
+		"for-each-ref",
+		"--sort=-committerdate",
+		"--format=%(refname:short)",
+		"refs/remotes/"+remote,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(strings.ReplaceAll(out, "\r", ""), "\n")
+	seen := map[string]struct{}{}
+	result := make([]string, 0, limit)
+	prefix := remote + "/"
+
+	for _, line := range lines {
+		v := strings.TrimSpace(line)
+		if v == "" || v == remote+"/HEAD" {
+			continue
+		}
+		if strings.HasPrefix(v, prefix) {
+			v = strings.TrimPrefix(v, prefix)
+		}
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		result = append(result, v)
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result, nil
 }
 
 func isAllowedLLM(cfg config, v string) bool {

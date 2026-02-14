@@ -81,6 +81,16 @@ Removes local worktrees whose branches are already merged into `mainBranch`.
 wtx clean
 ```
 
+### `wtx switch [index|branch|path]`
+
+Select a local worktree and open a shell in it.
+
+```bash
+wtx switch
+wtx switch 2
+wtx switch feature/my-branch
+```
+
 ## Config
 
 `wtx` reads config in this order:
