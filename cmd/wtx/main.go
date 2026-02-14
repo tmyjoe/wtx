@@ -18,12 +18,21 @@ type config struct {
 	MainBranch        string   `json:"mainBranch"`
 	DefaultBaseBranch string   `json:"defaultBaseBranch"`
 	WorktreesDir      string   `json:"worktreesDir"`
-	EnvFiles          []string `json:"envFiles"`
-	FrontendDir       string   `json:"frontendDir"`
-	BackendDir        string   `json:"backendDir"`
-	FrontendInstall   []string `json:"frontendInstallCmd"`
-	BackendInstall    []string `json:"backendInstallCmd"`
+	CopyFiles         []copyFileConfig `json:"copyFiles"`
+	PostCreateHooks   []hookConfig     `json:"postCreateHooks"`
 	LLM               llmCfg   `json:"llm"`
+}
+
+type copyFileConfig struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+type hookConfig struct {
+	Name          string   `json:"name"`
+	Cwd           string   `json:"cwd"`
+	Command       []string `json:"command"`
+	SkipIfMissing bool     `json:"skipIfMissing"`
 }
 
 type llmCfg struct {
@@ -51,7 +60,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: wtx <start|new-worktree|clean> [args...]"))
+		fatal(errors.New("usage: wtx <start|new|nw|new-worktree|clean> [args...]"))
 	}
 
 	sub := os.Args[1]
@@ -60,6 +69,8 @@ func main() {
 	switch sub {
 	case "start":
 		err = runStart(cfg, args)
+	case "new", "nw":
+		err = runNewWorktree(cfg, args, true)
 	case "new-worktree":
 		err = runNewWorktree(cfg, args, true)
 	case "clean":
@@ -200,12 +211,21 @@ func createWorktree(cfg config, task, base, llm string, runTask bool) error {
 		return err
 	}
 
-	fmt.Println("Copying environment files...")
-	for _, envFile := range cfg.EnvFiles {
-		src := filepath.Join(repoRoot, envFile)
-		dst := filepath.Join(targetPath, envFile)
+	fmt.Println("Copying configured files...")
+	for _, item := range cfg.CopyFiles {
+		from := strings.TrimSpace(item.From)
+		if from == "" {
+			continue
+		}
+		to := strings.TrimSpace(item.To)
+		if to == "" {
+			to = from
+		}
+
+		src := filepath.Join(repoRoot, from)
+		dst := filepath.Join(targetPath, to)
 		if _, err := os.Stat(src); err != nil {
-			fmt.Printf("Not found: %s (skipped)\n", envFile)
+			fmt.Printf("Not found: %s (skipped)\n", from)
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -214,28 +234,35 @@ func createWorktree(cfg config, task, base, llm string, runTask bool) error {
 		if err := copyFile(src, dst); err != nil {
 			return err
 		}
-		fmt.Printf("Copied: %s\n", envFile)
+		fmt.Printf("Copied: %s -> %s\n", from, to)
 	}
 
-	fmt.Println("Installing dependencies...")
-	frontendPath := filepath.Join(targetPath, cfg.FrontendDir)
-	if isDir(frontendPath) && len(cfg.FrontendInstall) > 0 {
-		fmt.Println("Installing frontend dependencies...")
-		if err := runCmdStream(frontendPath, cfg.FrontendInstall[0], cfg.FrontendInstall[1:]...); err != nil {
-			return err
+	fmt.Println("Running post-create hooks...")
+	for _, hook := range cfg.PostCreateHooks {
+		if len(hook.Command) == 0 {
+			continue
 		}
-	} else {
-		fmt.Println("Frontend install skipped")
-	}
+		name := strings.TrimSpace(hook.Name)
+		if name == "" {
+			name = strings.Join(hook.Command, " ")
+		}
 
-	backendPath := filepath.Join(targetPath, cfg.BackendDir)
-	if isDir(backendPath) && len(cfg.BackendInstall) > 0 {
-		fmt.Println("Installing backend dependencies...")
-		if err := runCmdStream(backendPath, cfg.BackendInstall[0], cfg.BackendInstall[1:]...); err != nil {
+		hookDir := targetPath
+		if strings.TrimSpace(hook.Cwd) != "" {
+			hookDir = filepath.Join(targetPath, hook.Cwd)
+		}
+		if !isDir(hookDir) {
+			if hook.SkipIfMissing {
+				fmt.Printf("Hook skipped (missing dir): %s [%s]\n", name, hookDir)
+				continue
+			}
+			return fmt.Errorf("hook directory not found: %s", hookDir)
+		}
+
+		fmt.Printf("Hook: %s\n", name)
+		if err := runCmdStream(hookDir, hook.Command[0], hook.Command[1:]...); err != nil {
 			return err
 		}
-	} else {
-		fmt.Println("Backend install skipped")
 	}
 
 	fmt.Printf("Worktree created at: %s\n", targetPath)
@@ -304,7 +331,7 @@ func generateBranchName(cfg config, task, llm string) string {
 		})
 		out, err := runCmdCapture("", llm, args...)
 		if err == nil {
-			v := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(out, "\r", ""), "\n", ""))
+			v := extractBranchCandidate(out)
 			if v != "" {
 				return v
 			}
@@ -344,6 +371,7 @@ func sanitizeBranch(v string) string {
 	s = regexpReplace(s, `-+`, "-")
 	s = regexpReplace(s, `/+`, "/")
 	s = strings.Trim(s, "-")
+	s = strings.Trim(s, "/")
 	if s == "" {
 		return ""
 	}
@@ -356,7 +384,32 @@ func sanitizeBranch(v string) string {
 	if !prefixOK {
 		s = "feature/" + s
 	}
+	if len(s) > 120 {
+		s = strings.TrimRight(s[:120], "-/")
+	}
 	return s
+}
+
+func extractBranchCandidate(out string) string {
+	text := strings.ReplaceAll(out, "\r", "\n")
+	re := regexpMustCompile(`(?m)\b(feature|bugfix|fix|chore|refactor|docs|test)\/[a-z0-9][a-z0-9\-/]{1,120}\b`)
+	matches := re.FindAllString(strings.ToLower(text), -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		v := sanitizeBranch(matches[i])
+		if v != "" && len(v) <= 120 {
+			return v
+		}
+	}
+
+	parts := strings.Fields(strings.ToLower(text))
+	for i := len(parts) - 1; i >= 0; i-- {
+		token := strings.Trim(parts[i], "\"'`.,:;[](){}<>")
+		v := sanitizeBranch(token)
+		if v != "" && len(v) <= 120 {
+			return v
+		}
+	}
+	return ""
 }
 
 func loadConfig(path string) (config, error) {
@@ -381,7 +434,7 @@ func loadConfig(path string) (config, error) {
 }
 
 func resolveConfigPath() string {
-	if v := strings.TrimSpace(os.Getenv("TMYJOE_CONFIG")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("WTX_CONFIG_PATH")); v != "" {
 		return v
 	}
 	if _, err := os.Stat("config.json"); err == nil {

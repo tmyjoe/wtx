@@ -2,20 +2,39 @@
   "mainBranch": "develop",
   "defaultBaseBranch": "develop",
   "worktreesDir": ".wt",
-  "envFiles": [
-    "apps/web/.env.local",
-    "apps/web/.env",
-    "apps/python/.env"
+  "copyFiles": [
+    {
+      "from": "apps/web/.env.local",
+      "to": "apps/web/.env.local"
+    },
+    {
+      "from": "apps/web/.env",
+      "to": "apps/web/.env"
+    },
+    {
+      "from": "apps/python/.env",
+      "to": "apps/python/.env"
+    }
   ],
-  "frontendDir": "apps/web",
-  "backendDir": "apps/python",
-  "frontendInstallCmd": [
-    "pnpm",
-    "install"
-  ],
-  "backendInstallCmd": [
-    "make",
-    "install"
+  "postCreateHooks": [
+    {
+      "name": "Install frontend dependencies",
+      "cwd": "apps/web",
+      "command": [
+        "pnpm",
+        "install"
+      ],
+      "skipIfMissing": true
+    },
+    {
+      "name": "Install backend dependencies",
+      "cwd": "apps/python",
+      "command": [
+        "make",
+        "install"
+      ],
+      "skipIfMissing": true
+    }
   ],
   "llm": {
     "default": "codex",
@@ -45,4 +64,3 @@
     }
   }
 }
-

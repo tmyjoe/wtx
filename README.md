@@ -40,7 +40,7 @@ cp config.json ~/.config/wtx/config.json
 2. Point CLI to your config:
 
 ```bash
-export TMYJOE_CONFIG="$HOME/.config/wtx/config.json"
+export WTX_CONFIG_PATH="$HOME/.config/wtx/config.json"
 ```
 
 3. Run:
@@ -63,12 +63,14 @@ wtx start codex
 wtx start "run pnpm format and apply" develop claude
 ```
 
-### `wtx new-worktree [task] [base-branch] [codex|claude]`
+### `wtx new [task] [base-branch] [codex|claude]`
 
 Direct worktree creation + optional AI launch.
+Aliases: `new`, `nw`, `new-worktree`
 
 ```bash
-wtx new-worktree "fix lint errors" develop codex
+wtx new "fix lint errors" develop codex
+wtx nw "fix lint errors" develop codex
 ```
 
 ### `wtx clean`
@@ -82,7 +84,7 @@ wtx clean
 ## Config
 
 `wtx` reads config in this order:
-- `TMYJOE_CONFIG` env var
+- `WTX_CONFIG_PATH` env var (preferred)
 - `./config.json` (current directory)
 - `.tmyjoe/wtx/config.json` (repo-local fallback)
 - `config.json` next to the binary
@@ -91,13 +93,30 @@ Main config keys:
 - `mainBranch`
 - `defaultBaseBranch`
 - `worktreesDir`
-- `envFiles`
-- `frontendDir` / `backendDir`
-- `frontendInstallCmd` / `backendInstallCmd`
+- `copyFiles`
+- `postCreateHooks`
 - `llm.default`
 - `llm.allowed`
 - `llm.branchNamePromptTemplate`
 - `llm.commands.*`
+
+Example:
+
+```json
+{
+  "copyFiles": [
+    { "from": "apps/web/.env.local", "to": "apps/web/.env.local" }
+  ],
+  "postCreateHooks": [
+    {
+      "name": "Install frontend dependencies",
+      "cwd": "apps/web",
+      "command": ["pnpm", "install"],
+      "skipIfMissing": true
+    }
+  ]
+}
+```
 
 ## Requirements
 
@@ -119,7 +138,7 @@ This repository also provides helper wrappers:
 - `.tmyjoe/new-worktree.sh`
 - `.tmyjoe/clean.sh`
 
-These wrappers set `TMYJOE_CONFIG` automatically and call the Go CLI.
+These wrappers set `WTX_CONFIG_PATH` automatically and call the Go CLI.
 
 ## License
 
