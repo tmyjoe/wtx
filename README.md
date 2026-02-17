@@ -11,11 +11,12 @@ It helps you:
 ## Features
 
 - Interactive `start` flow (`task`, `base branch`, `AI`)
-- `new-worktree` command for non-interactive usage
+- `new` command for non-interactive usage
 - Branch-name generation via AI with fallback sanitization
 - Remote-aware worktree creation (existing remote branch vs new branch)
 - Optional environment file copy and dependency install
 - `clean` command to remove merged worktrees
+- `propen` command to open/create a PR from the current branch
 - JSON config for project-specific behavior
 
 ## Install
@@ -66,7 +67,7 @@ wtx start "run pnpm format and apply" develop claude
 ### `wtx new [task] [base-branch] [codex|claude]`
 
 Direct worktree creation + optional AI launch.
-Aliases: `new`, `nw`, `new-worktree`
+Aliases: `new`, `nw`
 
 ```bash
 wtx new "fix lint errors" develop codex
@@ -89,6 +90,16 @@ Select a local worktree and open a shell in it.
 wtx switch
 wtx switch 2
 wtx switch feature/my-branch
+```
+
+### `wtx propen [base-branch]`
+
+Open the PR for the current branch in browser.  
+If no PR exists, create one with `gh` and open the create page.
+
+```bash
+wtx propen
+wtx propen develop
 ```
 
 ## Config

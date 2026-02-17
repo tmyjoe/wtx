@@ -19,12 +19,12 @@ import (
 var version = "dev"
 
 type config struct {
-	MainBranch        string   `json:"mainBranch"`
-	DefaultBaseBranch string   `json:"defaultBaseBranch"`
-	WorktreesDir      string   `json:"worktreesDir"`
+	MainBranch        string           `json:"mainBranch"`
+	DefaultBaseBranch string           `json:"defaultBaseBranch"`
+	WorktreesDir      string           `json:"worktreesDir"`
 	CopyFiles         []copyFileConfig `json:"copyFiles"`
 	PostCreateHooks   []hookConfig     `json:"postCreateHooks"`
-	LLM               llmCfg   `json:"llm"`
+	LLM               llmCfg           `json:"llm"`
 }
 
 type copyFileConfig struct {
@@ -40,10 +40,10 @@ type hookConfig struct {
 }
 
 type llmCfg struct {
-	Default                  string                    `json:"default"`
-	Allowed                  []string                  `json:"allowed"`
-	BranchNamePromptTemplate string                    `json:"branchNamePromptTemplate"`
-	Commands                 map[string]llmCommandCfg  `json:"commands"`
+	Default                  string                   `json:"default"`
+	Allowed                  []string                 `json:"allowed"`
+	BranchNamePromptTemplate string                   `json:"branchNamePromptTemplate"`
+	Commands                 map[string]llmCommandCfg `json:"commands"`
 }
 
 type llmCommandCfg struct {
@@ -64,7 +64,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: wtx <start|new|nw|new-worktree|clean|switch|version> [args...]"))
+		fatal(errors.New("usage: wtx <start|new|nw|clean|switch|propen|version> [args...]"))
 	}
 
 	sub := os.Args[1]
@@ -75,12 +75,12 @@ func main() {
 		err = runStart(cfg, args)
 	case "new", "nw":
 		err = runNewWorktree(cfg, args, true)
-	case "new-worktree":
-		err = runNewWorktree(cfg, args, true)
 	case "clean":
 		err = runClean(cfg)
 	case "switch":
 		err = runSwitch(args)
+	case "propen":
+		err = runPROpen(args)
 	case "version":
 		fmt.Println(resolveVersion())
 		return
@@ -99,14 +99,14 @@ func runStart(cfg config, args []string) error {
 
 	switch len(args) {
 	case 0:
-		task = promptRequired("作業内容: ")
+		task = promptRequired("Task description: ")
 		base = promptBaseBranch(cfg.DefaultBaseBranch)
-		llm = promptOptional("AIを選択してください (codex/claude): ")
+		llm = promptOptional("Select AI (codex/claude): ")
 	case 1:
 		v := strings.ToLower(strings.TrimSpace(args[0]))
 		if isAllowedLLM(cfg, v) {
 			llm = v
-			task = promptRequired("作業内容: ")
+			task = promptRequired("Task description: ")
 			base = promptBaseBranch(cfg.DefaultBaseBranch)
 		} else {
 			task = args[0]
@@ -129,7 +129,7 @@ func runStart(cfg config, args []string) error {
 
 	llm = normalizeLLM(cfg, llm)
 	if llm == "" {
-		llm = normalizeLLM(cfg, promptOptional("AIを選択してください (codex/claude): "))
+		llm = normalizeLLM(cfg, promptOptional("Select AI (codex/claude): "))
 	}
 	if llm == "" {
 		return fmt.Errorf("invalid AI selection (expected one of: %s)", strings.Join(cfg.LLM.Allowed, ", "))
@@ -154,9 +154,9 @@ func runNewWorktree(cfg config, args []string, runTask bool) error {
 	}
 
 	if strings.TrimSpace(task) == "" {
-		task = promptRequired("作業内容: ")
+		task = promptRequired("Task description: ")
 		base = promptBaseBranch(cfg.DefaultBaseBranch)
-		llm = promptDefault("AIを選択してください (codex/claude) ["+cfg.LLM.Default+"]: ", cfg.LLM.Default)
+		llm = promptDefault("Select AI (codex/claude) ["+cfg.LLM.Default+"]: ", cfg.LLM.Default)
 	}
 
 	if strings.TrimSpace(base) == "" {
@@ -234,7 +234,7 @@ func createWorktree(cfg config, task, base, llm string, runTask bool) error {
 		src := filepath.Join(repoRoot, from)
 		dst := filepath.Join(targetPath, to)
 		if _, err := os.Stat(src); err != nil {
-			fmt.Printf("Not found: %s (skipped)\n", from)
+			fmt.Printf("Missing file: %s (skipped)\n", from)
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -262,7 +262,7 @@ func createWorktree(cfg config, task, base, llm string, runTask bool) error {
 		}
 		if !isDir(hookDir) {
 			if hook.SkipIfMissing {
-				fmt.Printf("Hook skipped (missing dir): %s [%s]\n", name, hookDir)
+				fmt.Printf("Hook skipped (missing directory): %s [%s]\n", name, hookDir)
 				continue
 			}
 			return fmt.Errorf("hook directory not found: %s", hookDir)
@@ -366,6 +366,46 @@ func runSwitch(args []string) error {
 	return cmd.Run()
 }
 
+func runPROpen(args []string) error {
+	if err := requireCmd("git"); err != nil {
+		return err
+	}
+	if err := requireCmd("gh"); err != nil {
+		return err
+	}
+	if _, err := runCmdCapture("", "git", "rev-parse", "--is-inside-work-tree"); err != nil {
+		return errors.New("not inside a git repository")
+	}
+
+	branchRaw, err := runCmdCapture("", "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	branch := strings.TrimSpace(branchRaw)
+	if branch == "" || branch == "HEAD" {
+		return errors.New("detached HEAD is not supported; switch to a branch first")
+	}
+
+	if runCmd("gh", "pr", "view", branch) == nil {
+		fmt.Printf("Opening existing PR for branch '%s'...\n", branch)
+		return runCmdStream("", "gh", "pr", "view", branch, "--web")
+	}
+
+	base := ""
+	if len(args) > 0 {
+		base = strings.TrimSpace(args[0])
+	}
+	if base == "" {
+		base = detectDefaultBaseBranch()
+	}
+	if base == "" {
+		return errors.New("could not determine base branch; pass it explicitly: wtx propen <base-branch>")
+	}
+
+	fmt.Printf("No existing PR found. Creating PR for '%s' -> '%s'...\n", branch, base)
+	return runCmdStream("", "gh", "pr", "create", "--head", branch, "--base", base, "--fill", "--web")
+}
+
 func selectWorktree(entries []worktreeEntry, args []string) (worktreeEntry, error) {
 	if len(args) > 0 {
 		// index selection
@@ -386,7 +426,7 @@ func selectWorktree(entries []worktreeEntry, args []string) (worktreeEntry, erro
 		return worktreeEntry{}, fmt.Errorf("worktree not found: %s", target)
 	}
 
-	fmt.Println("Select worktree:")
+	fmt.Println("Select a worktree:")
 	for i, e := range entries {
 		branch := strings.TrimPrefix(e.branch, "refs/heads/")
 		if branch == "" {
@@ -394,7 +434,7 @@ func selectWorktree(entries []worktreeEntry, args []string) (worktreeEntry, erro
 		}
 		fmt.Printf("  %d) %s\n", i+1, branch)
 	}
-	fmt.Print("番号またはブランチ名を入力: ")
+	fmt.Print("Enter number or branch name: ")
 	in, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	in = strings.TrimSpace(in)
 	if in == "" {
@@ -519,19 +559,21 @@ func resolveConfigPath() string {
 	if v := strings.TrimSpace(os.Getenv("WTX_CONFIG_PATH")); v != "" {
 		return v
 	}
-	if _, err := os.Stat("config.json"); err == nil {
-		return "config.json"
-	}
-	if _, err := os.Stat(".tmyjoe/wtx/config.json"); err == nil {
-		return ".tmyjoe/wtx/config.json"
-	}
-	if exe, err := os.Executable(); err == nil {
-		p := filepath.Join(filepath.Dir(exe), "config.json")
+	if root, err := gitRootDir(); err == nil {
+		p := filepath.Join(root, "wtx.config.json")
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	return ".tmyjoe/wtx/config.json"
+	return "wtx.config.json"
+}
+
+func gitRootDir() (string, error) {
+	out, err := runCmdCapture("", "git", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func parseWorktreeList(raw string) []worktreeEntry {
@@ -639,7 +681,7 @@ func promptDefault(label, defaultValue string) string {
 func promptRequired(label string) string {
 	v := promptOptional(label)
 	if strings.TrimSpace(v) == "" {
-		fatal(errors.New("no description provided"))
+		fatal(errors.New("no task description provided"))
 	}
 	return v
 }
@@ -648,14 +690,14 @@ func promptBaseBranch(defaultBranch string) string {
 	_ = runCmd("git", "fetch", "origin", "--prune")
 	branches, err := recentRemoteBranches("origin", 10)
 	if err != nil || len(branches) == 0 {
-		return promptDefault("ベースブランチ ["+defaultBranch+"]: ", defaultBranch)
+		return promptDefault("Base branch ["+defaultBranch+"]: ", defaultBranch)
 	}
 
-	fmt.Println("ベースブランチ候補（remote更新順）:")
+	fmt.Println("Base branch candidates (most recently updated on remote):")
 	for i, b := range branches {
 		fmt.Printf("  %d) %s\n", i+1, b)
 	}
-	fmt.Printf("番号またはブランチ名を入力 [%s]: ", defaultBranch)
+	fmt.Printf("Enter number or branch name [%s]: ", defaultBranch)
 	in, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	in = strings.TrimSpace(in)
 	if in == "" {
@@ -709,6 +751,24 @@ func recentRemoteBranches(remote string, limit int) ([]string, error) {
 		}
 	}
 	return result, nil
+}
+
+func detectDefaultBaseBranch() string {
+	if out, err := runCmdCapture("", "gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"); err == nil {
+		v := strings.TrimSpace(out)
+		if v != "" {
+			return v
+		}
+	}
+
+	if out, err := runCmdCapture("", "git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		v := strings.TrimSpace(out)
+		v = strings.TrimPrefix(v, "origin/")
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func isAllowedLLM(cfg config, v string) bool {
