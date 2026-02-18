@@ -64,7 +64,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: wtx <start|new|nw|clean|switch|propen|version> [args...]"))
+		fatal(errors.New("usage: wtx <start|new|nw|clean|switch|co|rco|propen|version> [args...]"))
 	}
 
 	sub := os.Args[1]
@@ -79,6 +79,8 @@ func main() {
 		err = runClean(cfg)
 	case "switch":
 		err = runSwitch(args)
+	case "co", "rco":
+		err = runRemoteCheckout(args)
 	case "propen":
 		err = runPROpen(args)
 	case "version":
@@ -96,6 +98,7 @@ func runStart(cfg config, args []string) error {
 	var task string
 	base := cfg.DefaultBaseBranch
 	llm := ""
+	initialPrompt := ""
 
 	switch len(args) {
 	case 0:
@@ -134,8 +137,14 @@ func runStart(cfg config, args []string) error {
 	if llm == "" {
 		return fmt.Errorf("invalid AI selection (expected one of: %s)", strings.Join(cfg.LLM.Allowed, ", "))
 	}
+	useSeparateInitialPrompt := promptYesNoDefault("Use separate initial prompt for AI run? [y/N]: ", false)
+	if useSeparateInitialPrompt {
+		initialPrompt = promptRequired("Initial prompt for AI: ")
+	} else {
+		initialPrompt = task
+	}
 
-	return createWorktree(cfg, task, base, llm, true)
+	return createWorktree(cfg, task, base, llm, initialPrompt, true)
 }
 
 func runNewWorktree(cfg config, args []string, runTask bool) error {
@@ -166,10 +175,10 @@ func runNewWorktree(cfg config, args []string, runTask bool) error {
 	if llm == "" {
 		return fmt.Errorf("invalid AI selection (expected one of: %s)", strings.Join(cfg.LLM.Allowed, ", "))
 	}
-	return createWorktree(cfg, task, base, llm, runTask)
+	return createWorktree(cfg, task, base, llm, task, runTask)
 }
 
-func createWorktree(cfg config, task, base, llm string, runTask bool) error {
+func createWorktree(cfg config, task, base, llm, initialPrompt string, runTask bool) error {
 	if err := requireCmd("git"); err != nil {
 		return err
 	}
@@ -280,7 +289,7 @@ func createWorktree(cfg config, task, base, llm string, runTask bool) error {
 
 	if runTask {
 		fmt.Printf("Running %s with task prompt...\n", llm)
-		if err := runLLMTask(cfg, llm, targetPath, task); err != nil {
+		if err := runLLMTask(cfg, llm, targetPath, initialPrompt); err != nil {
 			return err
 		}
 	}
@@ -302,6 +311,35 @@ func runClean(cfg config) error {
 	}
 
 	mainWorktree := entries[0].path
+
+	// Remove worktrees whose directories no longer exist on disk.
+	fmt.Println("Checking for stale worktrees (missing directories)...")
+	for _, e := range entries {
+		branch := strings.TrimPrefix(e.branch, "refs/heads/")
+		if branch == "" || branch == cfg.MainBranch {
+			continue
+		}
+		if isDir(e.path) {
+			continue
+		}
+		fmt.Printf("Directory missing for branch '%s' (%s). Removing worktree...\n", branch, e.path)
+		_ = runCmd("git", "worktree", "remove", e.path, "--force")
+		if err := runCmd("git", "branch", "-d", branch); err != nil {
+			_ = runCmd("git", "branch", "-D", branch)
+		}
+		fmt.Printf("Removed stale worktree and branch: %s\n", branch)
+	}
+	// Prune any remaining stale worktree metadata.
+	_ = runCmd("git", "worktree", "prune")
+
+	// Re-read worktree list after pruning stale entries.
+	listRaw, err = runCmdCapture("", "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	entries = parseWorktreeList(listRaw)
+
+	// Remove worktrees whose branches have been merged.
 	fmt.Println("Checking for merged worktrees...")
 	for _, e := range entries {
 		branch := strings.TrimPrefix(e.branch, "refs/heads/")
@@ -326,7 +364,7 @@ func runClean(cfg config) error {
 		}
 		fmt.Printf("Removed worktree and branch: %s\n", branch)
 	}
-	fmt.Println("Done cleaning merged worktrees.")
+	fmt.Println("Done cleaning worktrees.")
 	return nil
 }
 
@@ -404,6 +442,107 @@ func runPROpen(args []string) error {
 
 	fmt.Printf("No existing PR found. Creating PR for '%s' -> '%s'...\n", branch, base)
 	return runCmdStream("", "gh", "pr", "create", "--head", branch, "--base", base, "--fill", "--web")
+}
+
+func runRemoteCheckout(args []string) error {
+	if err := requireCmd("git"); err != nil {
+		return err
+	}
+	if _, err := runCmdCapture("", "git", "rev-parse", "--is-inside-work-tree"); err != nil {
+		return errors.New("not inside a git repository")
+	}
+
+	const remote = "origin"
+	if err := runCmdStream("", "git", "fetch", remote, "--prune"); err != nil {
+		return err
+	}
+
+	branch := ""
+	if len(args) > 0 {
+		branch = strings.TrimSpace(args[0])
+	}
+	if branch == "" {
+		branches, err := recentRemoteBranches(remote, 20)
+		if err != nil || len(branches) == 0 {
+			return errors.New("branch name is required (example: wtx co feature/my-branch)")
+		}
+
+		fmt.Println("Remote branch candidates (most recently updated):")
+		for i, b := range branches {
+			fmt.Printf("  %d) %s\n", i+1, b)
+		}
+		fmt.Print("Enter number or branch name: ")
+		in, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		in = strings.TrimSpace(in)
+		if in == "" {
+			return errors.New("no branch provided")
+		}
+		if idx, err := strconv.Atoi(in); err == nil {
+			if idx >= 1 && idx <= len(branches) {
+				branch = branches[idx-1]
+			} else {
+				return fmt.Errorf("invalid index: %d", idx)
+			}
+		} else {
+			branch = in
+		}
+	}
+
+	branch = strings.TrimSpace(branch)
+	branch = strings.TrimPrefix(branch, remote+"/")
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	branch = strings.Trim(branch, "/")
+	if branch == "" {
+		return errors.New("invalid branch name")
+	}
+
+	remoteRef := "refs/remotes/" + remote + "/" + branch
+	if runCmd("git", "show-ref", "--verify", "--quiet", remoteRef) != nil {
+		return fmt.Errorf("remote branch not found: %s/%s", remote, branch)
+	}
+
+	localRef := "refs/heads/" + branch
+	localExists := runCmd("git", "show-ref", "--verify", "--quiet", localRef) == nil
+	if !localExists {
+		fmt.Printf("Creating local tracking branch '%s' from '%s/%s'...\n", branch, remote, branch)
+		return runCmdStream("", "git", "switch", "-c", branch, "--track", remote+"/"+branch)
+	}
+
+	currentBranchRaw, err := runCmdCapture("", "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return err
+	}
+	currentBranch := strings.TrimSpace(currentBranchRaw)
+	if currentBranch == branch {
+		fmt.Printf("Already on '%s'. Skipping switch.\n", branch)
+	} else {
+		fmt.Printf("Switching to existing branch '%s'...\n", branch)
+		if err := switchBranchAllowOtherWorktrees(branch); err != nil {
+			return err
+		}
+	}
+
+	_ = runCmd("git", "branch", "--set-upstream-to="+remote+"/"+branch, branch)
+	fmt.Printf("Fast-forwarding '%s' from '%s/%s'...\n", branch, remote, branch)
+	if err := runCmdStream("", "git", "merge", "--ff-only", remote+"/"+branch); err != nil {
+		return fmt.Errorf("failed to fast-forward '%s'; resolve divergence manually", branch)
+	}
+
+	fmt.Printf("Ready: %s tracks %s/%s\n", branch, remote, branch)
+	return nil
+}
+
+func switchBranchAllowOtherWorktrees(branch string) error {
+	out, err := runCmdCapture("", "git", "switch", branch)
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(out, "already used by worktree") {
+		fmt.Printf("Branch '%s' is already checked out in another worktree. Retrying with --ignore-other-worktrees...\n", branch)
+		_, err2 := runCmdCapture("", "git", "switch", "--ignore-other-worktrees", branch)
+		return err2
+	}
+	return errors.New(strings.TrimSpace(out))
 }
 
 func selectWorktree(entries []worktreeEntry, args []string) (worktreeEntry, error) {
@@ -684,6 +823,14 @@ func promptRequired(label string) string {
 		fatal(errors.New("no task description provided"))
 	}
 	return v
+}
+
+func promptYesNoDefault(label string, defaultYes bool) bool {
+	v := strings.ToLower(strings.TrimSpace(promptOptional(label)))
+	if v == "" {
+		return defaultYes
+	}
+	return v == "y" || v == "yes"
 }
 
 func promptBaseBranch(defaultBranch string) string {

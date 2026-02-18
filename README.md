@@ -17,6 +17,7 @@ It helps you:
 - Optional environment file copy and dependency install
 - `clean` command to remove merged worktrees
 - `propen` command to open/create a PR from the current branch
+- `co` command to checkout/sync a branch from `origin` without detached HEAD
 - JSON config for project-specific behavior
 
 ## Install
@@ -55,6 +56,7 @@ wtx start
 ### `wtx start [task] [base-branch] [codex|claude]`
 
 Interactive-first workflow.
+When starting, `wtx` asks whether to use a separate initial AI prompt or reuse the task description.
 
 Examples:
 
@@ -90,6 +92,17 @@ Select a local worktree and open a shell in it.
 wtx switch
 wtx switch 2
 wtx switch feature/my-branch
+```
+
+### `wtx co [origin/branch|branch]`
+
+Checkout a remote branch as a local tracking branch.
+- If local branch does not exist: create + track `origin/<branch>`.
+- If local branch exists: switch to it and fast-forward from `origin/<branch>`.
+
+```bash
+wtx co feature/feat/bulk-group-update-20260217
+wtx co origin/feature/feat/bulk-group-update-20260217
 ```
 
 ### `wtx propen [base-branch]`
