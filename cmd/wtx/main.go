@@ -139,7 +139,7 @@ func runStart(cfg config, args []string) error {
 	}
 	useSeparateInitialPrompt := promptYesNoDefault("Use separate initial prompt for AI run? [y/N]: ", false)
 	if useSeparateInitialPrompt {
-		initialPrompt = promptRequired("Initial prompt for AI: ")
+		initialPrompt = ""
 	} else {
 		initialPrompt = task
 	}
@@ -349,6 +349,10 @@ func runClean(cfg config) error {
 
 		merged := runCmdIn(mainWorktree, "git", "merge-base", "--is-ancestor", branch, cfg.MainBranch) == nil
 		if !merged {
+			// Squash merges don't preserve ancestry; check GitHub PR state as fallback.
+			merged = isBranchSquashMerged(branch)
+		}
+		if !merged {
 			fmt.Printf("Branch '%s' is not merged yet. Keeping worktree.\n", branch)
 			continue
 		}
@@ -366,6 +370,20 @@ func runClean(cfg config) error {
 	}
 	fmt.Println("Done cleaning worktrees.")
 	return nil
+}
+
+// isBranchSquashMerged checks if a branch has a merged PR on GitHub.
+// This catches squash-merged branches that git merge-base --is-ancestor misses.
+func isBranchSquashMerged(branch string) bool {
+	if !commandExists("gh") {
+		return false
+	}
+	out, err := runCmdCapture("", "gh", "pr", "list", "--head", branch, "--state", "merged", "--json", "number", "--limit", "1")
+	if err != nil {
+		return false
+	}
+	out = strings.TrimSpace(out)
+	return out != "" && out != "[]"
 }
 
 func runSwitch(args []string) error {
@@ -616,6 +634,9 @@ func runLLMTask(cfg config, llm, worktreePath, task string) error {
 	if !commandExists(llm) {
 		fmt.Printf("%s not found. Skip auto-run.\n", llm)
 		return nil
+	}
+	if task == "" {
+		return runCmdStream(worktreePath, llm)
 	}
 	args := replaceTemplates(aiCfg.TaskRunArgsTemplate, map[string]string{
 		"{task}": task,
@@ -879,7 +900,7 @@ func recentRemoteBranches(remote string, limit int) ([]string, error) {
 
 	for _, line := range lines {
 		v := strings.TrimSpace(line)
-		if v == "" || v == remote+"/HEAD" {
+		if v == "" || v == remote+"/HEAD" || v == remote {
 			continue
 		}
 		if strings.HasPrefix(v, prefix) {
