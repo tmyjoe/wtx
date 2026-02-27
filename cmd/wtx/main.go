@@ -64,7 +64,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: wtx <start|new|nw|clean|switch|co|rco|propen|version> [args...]"))
+		fatal(errors.New("usage: wtx <start|new|nw|clean|switch|cd|code|co|rco|propen|version> [args...]"))
 	}
 
 	sub := os.Args[1]
@@ -79,6 +79,10 @@ func main() {
 		err = runClean(cfg)
 	case "switch":
 		err = runSwitch(args)
+	case "cd":
+		err = runCd(args)
+	case "code":
+		err = runCode(args)
 	case "co", "rco":
 		err = runRemoteCheckout(args)
 	case "propen":
@@ -420,6 +424,61 @@ func runSwitch(args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func runCd(args []string) error {
+	if err := requireCmd("git"); err != nil {
+		return err
+	}
+	if _, err := runCmdCapture("", "git", "rev-parse", "--is-inside-work-tree"); err != nil {
+		return errors.New("not inside a git repository")
+	}
+
+	listRaw, err := runCmdCapture("", "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	entries := parseWorktreeList(listRaw)
+	if len(entries) == 0 {
+		return errors.New("no worktrees found")
+	}
+
+	selected, err := selectWorktree(entries, args)
+	if err != nil {
+		return err
+	}
+
+	fmt.Print(selected.path)
+	return nil
+}
+
+func runCode(args []string) error {
+	if err := requireCmd("git"); err != nil {
+		return err
+	}
+	if err := requireCmd("code"); err != nil {
+		return err
+	}
+	if _, err := runCmdCapture("", "git", "rev-parse", "--is-inside-work-tree"); err != nil {
+		return errors.New("not inside a git repository")
+	}
+
+	listRaw, err := runCmdCapture("", "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	entries := parseWorktreeList(listRaw)
+	if len(entries) == 0 {
+		return errors.New("no worktrees found")
+	}
+
+	selected, err := selectWorktree(entries, args)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Opening VS Code in: %s\n", selected.path)
+	return runCmdStream("", "code", selected.path)
 }
 
 func runPROpen(args []string) error {
